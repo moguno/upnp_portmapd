@@ -1,0 +1,141 @@
+#! /usr/bin/env ruby
+#coding: utf-8
+
+require "rubygems"
+require "UPnP"
+require "yaml"
+require "socket"
+require "logger"
+
+# シグナルハンドラでも使えるLOGGER
+class MogLogger
+  def initialize(*args)
+    @logger = Logger.new(*args)
+  end
+
+  def method_missing(method, *args)
+    Thread.new {
+      @logger.send(method, *args)
+    }.join
+  end
+end
+
+LOGGER = MogLogger.new("/var/log/upnp_portmapd.log", 5)
+LOGGER.level = Logger::INFO
+
+# UPnPクラスにメソッドを追加
+class UPnP::UPnP
+  # 指定されたポートマッピングを解除する
+  def delete_maps(ip, portmaps)
+    current_portmaps = portMappings
+
+    portmaps.each { |portmap|
+      exist_portmap = current_portmaps.find { |_| _.nport == portmap["ExtPort"] }
+
+      # ルータに登録されている
+      if exist_portmap
+        LOGGER.info("Deleting portmap:#{portmap["ExtPort"]}/#{portmap["Protocol"].upcase} => #{ip}:#{portmap["IntPort"]}")
+        deletePortMapping(portmap["ExtPort"], portmap["Protocol"].upcase)
+      end
+    }
+  end
+
+  # ポートマッピングを設定する。
+  # 既に違うIPアドレスが指定ポートを使用している場合は、上書きする。
+  def add_maps(ip, portmaps)
+    current_portmaps = portMappings
+
+    portmaps.each { |portmap|
+      do_add = true
+
+      exist_portmap = current_portmaps.find { |_| _.nport == portmap["ExtPort"] }
+
+      # ルータに登録されている
+      if exist_portmap
+        # 指定したIPアドレスである→何もしない
+        if exist_portmap.client == ip
+          do_add = false
+        else
+          # 既存のポートマッピングを削除する
+          LOGGER.info("Deleting portmap:#{portmap["ExtPort"]}/#{portmap["Protocol"].upcase} => #{exist_portmap.client}:#{portmap["IntPort"]}")
+          deletePortMapping(portmap["ExtPort"], portmap["Protocol"].upcase)
+        end
+      end
+
+      # 追加必要
+      if do_add
+        LOGGER.info("Adding portmap:#{portmap["ExtPort"]}/#{portmap["Protocol"].upcase} => #{ip}:#{portmap["IntPort"]}")
+        addPortMapping(portmap["ExtPort"], portmap["IntPort"], portmap["Protocol"].upcase, "upnp_portmapd", ip)
+      end
+    }
+  end 
+end
+
+# 設定ファイルを読み込む
+def load_config(path = "/etc/upnp_portmapd.conf")
+  File.open(path, "rt") { |fp|
+    YAML.load(fp.read)
+  }
+end
+
+# main
+begin
+  Process.daemon
+
+  begin
+    config = load_config("/etc/upnp_portmapd.conf")
+  rescue => e
+    LOGGER.fatal("Config load error:#{e}:#{e.backtrace[0]}")
+    exit
+  end
+
+  upnp = UPnP::UPnP.new
+  prev_ips = {}
+
+  period = if config["Settings"] && config["Settings"]["Period"]
+    config["Settings"]["Period"].to_f
+  else
+    60.0
+  end
+
+  # 終了シグナル
+  Signal.trap("TERM") {
+    LOGGER.info("Process termination start")
+
+    config["PortMapping"].each { |host, portmaps|
+      begin
+        ip = prev_ips[host]
+
+        if ip
+          LOGGER.info("Portmaping deletion start: #{host}(#{ip})")
+          upnp.delete_maps(ip, portmaps)
+        end
+      rescue => e
+        LOGGER.error("#{host}:#{e}:#{e.backtrace[0]}")
+      end
+    }
+
+    LOGGER.info("Process termination finished")
+    exit
+  }
+
+  loop {
+    config["PortMapping"].each { |host, portmaps|
+      begin
+        ip = IPSocket.getaddress(host)
+
+        # IPアドレスが変わっている or 初回
+        if ip != prev_ips[host]
+          LOGGER.info("Portmaping start: #{host}(#{ip})")
+          upnp.add_maps(ip, portmaps)
+        end
+
+        prev_ips[host] = ip
+      rescue => e
+        LOGGER.error("#{host}:#{e}:#{e.backtrace[0]}")
+      end
+    }
+
+    sleep(period)
+  }
+end

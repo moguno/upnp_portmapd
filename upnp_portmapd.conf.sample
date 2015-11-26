@@ -1,0 +1,20 @@
+# 設定
+Settings:
+  # ポートマッピング更新周期(秒)
+  Period: 5
+
+# ポートマッピング定義
+PortMapping:
+  # 転送先ホスト名
+  akari.local:
+   - ExtPort: 82   # 外部ポート
+     IntPort: 81   # 転送先ポート
+     Protocol: TCP # プロトコル(TCP/UDP)
+   - ExtPort: 100
+     IntPort: 101
+     Protocol: UDP
+
+  alicia.local:
+   - ExtPort: 101
+     IntPort: 102
+     Protocol: UDP
